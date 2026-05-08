@@ -23,10 +23,13 @@ warnings.filterwarnings("ignore")   # suppress RAGAS deprecation warnings
 
 from pathlib import Path
 
+from dotenv import load_dotenv
+load_dotenv()
+
 # ── 1. Imports ───────────────────────────────────────────────────────────────
 # TODO: import RAGAS evaluate + dataset classes
 # from ragas import evaluate, EvaluationDataset, SingleTurnSample
-
+from ragas import evaluate, EvaluationDataset, SingleTurnSample
 # TODO: import the 4 metric instances (NOT from ragas.metrics.collections)
 # from ragas.metrics import (
 #     faithfulness,
@@ -34,6 +37,12 @@ from pathlib import Path
 #     context_recall,
 #     context_precision,
 # )
+from ragas.metrics import (
+    faithfulness,
+    answer_relevancy,
+    context_recall,
+    context_precision,
+)
 
 # TODO: import LangChain components (same as steps 1 & 2)
 # from langchain_openai import ChatOpenAI, OpenAIEmbeddings
@@ -43,9 +52,16 @@ from pathlib import Path
 # from langchain_text_splitters import RecursiveCharacterTextSplitter
 # from langsmith import traceable
 
+from langchain_openai import ChatOpenAI, OpenAIEmbeddings
+from langchain_core.prompts import ChatPromptTemplate
+from langchain_core.output_parsers import StrOutputParser
+from langchain_community.vectorstores import FAISS
+from langchain_text_splitters import RecursiveCharacterTextSplitter
+from langsmith import traceable
+
 # TODO: import numpy for averaging
 # import numpy as np
-
+import numpy as np
 
 # ── 2. QA pairs with ground-truth answers ───────────────────────────────────
 # Each entry has a "question" and a "reference" (ground-truth answer).
@@ -158,24 +174,74 @@ QA_PAIRS = [
 # TODO: define PROMPT_V1 and PROMPT_V2 (copy from step 2)
 # SYSTEM_V1 = "..."
 # PROMPT_V1 = ChatPromptTemplate.from_messages([("system", SYSTEM_V1), ("human", "{question}")])
-
+SYSTEM_V1 = (
+    "You are a helpful AI assistant. "
+    "Answer the user's question using ONLY the provided context. "
+    "Keep your answer concise (2-4 sentences). "
+    "If the context does not contain the answer, say: 'I don't have enough information.'\n\n"
+    "Context:\n{context}"
+)
+PROMPT_V1 = ChatPromptTemplate.from_messages([
+    ("system", SYSTEM_V1),
+    ("human",  "{question}"),
+])
 # SYSTEM_V2 = "..."
 # PROMPT_V2 = ChatPromptTemplate.from_messages([("system", SYSTEM_V2), ("human", "{question}")])
+SYSTEM_V2 = (
+    "You are an expert AI tutor. Provide a structured, accurate answer.\n\n"
+    "Instructions:\n"
+    "1. Read the context carefully.\n"
+    "2. Identify the key facts relevant to the question.\n"
+    "3. Write a clear, well-organized answer (3-5 sentences).\n"
+    "4. State explicitly if the context lacks sufficient information.\n\n"
+    "Context:\n{context}"
+)
+PROMPT_V2 = ChatPromptTemplate.from_messages([
+    ("system", SYSTEM_V2),
+    ("human",  "{question}"),
+])
 
 PROMPTS = {
-    "v1": None,   # TODO: replace None with PROMPT_V1
-    "v2": None,   # TODO: replace None with PROMPT_V2
+    "v1": PROMPT_V1,
+    "v2": PROMPT_V2
 }
 
 
 # ── 4. Build vectorstore (reuse logic from step 1) ───────────────────────────
+embeddings = OpenAIEmbeddings(
+    model=os.getenv("OPENAI_EMBEDDINGS_MODEL"),
+    api_key=os.getenv("OPENAI_API_KEY"),
+    base_url=os.getenv("OPENAI_BASE_URL"),
+)
 def build_vectorstore():
-    # TODO: copy from step 1
-    pass
+    """
+    Load the knowledge base, split into chunks, embed and index with FAISS.
 
+    Steps:
+      a) Read your dataset
+      b) Split text with RecursiveCharacterTextSplitter(chunk_size=500, chunk_overlap=50)
+      c) Call FAISS.from_texts(chunks, embeddings) to build the index
+      d) Return the vectorstore
+    """
+    # TODO: read your dataset file
+    # text = Path("data/your_dataset.txt").read_text()
+    text = Path("data/knowledge_base.txt").read_text()
+    # TODO: create a text splitter and split the text
+    # splitter = RecursiveCharacterTextSplitter(chunk_size=500, chunk_overlap=50)
+    # chunks = splitter.split_text(text)
+    # print(f"Split into {len(chunks)} chunks")
+    splitter = RecursiveCharacterTextSplitter(chunk_size=500, chunk_overlap=50)
+    chunks = splitter.split_text(text)
+    print(f"Split into {len(chunks)} chunks")
+    # TODO: build and return the FAISS vectorstore
+    # vectorstore = FAISS.from_texts(chunks, embeddings)
+    # return vectorstore
+    vectorstore = FAISS.from_texts(chunks, embeddings)
+    return vectorstore
 
 # ── 5. Run RAG and capture outputs + contexts ────────────────────────────────
 # TODO: optionally add @traceable decorator
+@traceable(name="run-rag", tags=["ragas-eval", "step3"])
 def run_rag(retriever, llm, prompt, question: str) -> dict:
     """
     Run the RAG chain for one question.
@@ -189,14 +255,15 @@ def run_rag(retriever, llm, prompt, question: str) -> dict:
     # docs     = retriever.invoke(question)
     # contexts = [doc.page_content for doc in docs]   # ← list of strings!
     # ctx_str  = "\n\n".join(contexts)
-
+    docs     = retriever.invoke(question)
+    contexts = [doc.page_content for doc in docs]   # ← list of strings!
+    ctx_str  = "\n\n".join(contexts)
     # TODO: run the chain
     # answer = (prompt | llm | StrOutputParser()).invoke({"context": ctx_str, "question": question})
-
+    answer = (prompt | llm | StrOutputParser()).invoke({"context": ctx_str, "question": question})
     # TODO: return both answer and contexts list
     # return {"answer": answer, "contexts": contexts}
-
-    pass  # remove this line when done
+    return {"answer": answer, "contexts": contexts}
 
 
 def collect_rag_outputs(vectorstore, prompt_version: str) -> list:
@@ -208,7 +275,14 @@ def collect_rag_outputs(vectorstore, prompt_version: str) -> list:
     # retriever = vectorstore.as_retriever(search_kwargs={"k": 3})
     # llm       = ChatOpenAI(...)
     # prompt    = PROMPTS[prompt_version]
-
+    retriever = vectorstore.as_retriever(search_kwargs={"k": 3})
+    llm       = ChatOpenAI(
+        model=os.getenv("OPENAI_MODEL"),
+        api_key=os.getenv("OPENAI_API_KEY"),
+        base_url=os.getenv("OPENAI_BASE_URL"),
+        temperature=0.0,
+    )
+    prompt    = PROMPTS[prompt_version]
     results = []
     print(f"\nRunning 50 questions with prompt {prompt_version} ...")
 
@@ -221,6 +295,13 @@ def collect_rag_outputs(vectorstore, prompt_version: str) -> list:
         #     "answer":    out["answer"],
         #     "contexts":  out["contexts"],   # must be list[str]
         # })
+        out = run_rag(retriever, llm, prompt, qa["question"])
+        results.append({
+            "question":  qa["question"],
+            "reference": qa["reference"],
+            "answer":    out["answer"],
+            "contexts":  out["contexts"],   # must be list[str]
+        })
         print(f"  [{i:02d}/50] {qa['question'][:60]}")
 
     return results
@@ -248,8 +329,16 @@ def build_ragas_dataset(rag_results: list):
     #     for r in rag_results
     # ]
     # return EvaluationDataset(samples=samples)
-
-    pass  # remove this line when done
+    samples = [
+        SingleTurnSample(
+            user_input=r["question"],
+            response=r["answer"],
+            retrieved_contexts=r["contexts"],
+            reference=r["reference"],
+        )
+        for r in rag_results
+    ]
+    return EvaluationDataset(samples=samples)
 
 
 # ── 7. Run RAGAS evaluation ──────────────────────────────────────────────────
@@ -262,11 +351,21 @@ def run_ragas_eval(rag_results: list, version: str) -> dict:
 
     # TODO: create the EvaluationDataset
     # dataset = build_ragas_dataset(rag_results)
-
+    dataset = build_ragas_dataset(rag_results)
     # TODO: create LLM and embeddings for RAGAS to use
     # llm_eval = ChatOpenAI(...)
     # emb_eval = OpenAIEmbeddings(...)
-
+    llm_eval = ChatOpenAI(
+        model=os.getenv("OPENAI_MODEL"),
+        api_key=os.getenv("OPENAI_API_KEY"),
+        base_url=os.getenv("OPENAI_BASE_URL"),
+        temperature=0.0,
+    )
+    emb_eval = OpenAIEmbeddings(
+        model=os.getenv("OPENAI_EMBEDDINGS_MODEL"),
+        api_key=os.getenv("OPENAI_API_KEY"),
+        base_url=os.getenv("OPENAI_BASE_URL"),
+    )
     # TODO: run evaluate() — this makes many LLM calls!
     # result = evaluate(
     #     dataset,
@@ -274,21 +373,31 @@ def run_ragas_eval(rag_results: list, version: str) -> dict:
     #     llm=llm_eval,
     #     embeddings=emb_eval,
     # )
-
+    result = evaluate(
+        dataset,
+        metrics=[faithfulness, answer_relevancy, context_recall, context_precision],
+        llm=llm_eval,
+        embeddings=emb_eval,
+    )
     # TODO: extract mean scores
     # result[metric_name] → list of floats for 50 samples → take mean
     # scores = {}
     # for key in ["faithfulness", "answer_relevancy", "context_recall", "context_precision"]:
     #     raw = result[key]           # list of floats
     #     scores[key] = float(np.mean([v for v in raw if v is not None]))
-
+    scores = {}
+    for key in ["faithfulness", "answer_relevancy", "context_recall", "context_precision"]:
+        raw = result[key]           # list of floats
+        scores[key] = float(np.mean([v for v in raw if v is not None]))
     # TODO: print and return scores
     # for k, v in scores.items():
     #     star = " ⭐" if k == "faithfulness" and v >= 0.8 else ""
     #     print(f"  {k:30s}: {v:.4f}{star}")
     # return scores
-
-    pass  # remove this line when done
+    for k, v in scores.items():
+        star = " ⭐" if k == "faithfulness" and v >= 0.8 else ""
+        print(f"  {k:30s}: {v:.4f}{star}")
+    return scores
 
 
 # ── 8. Main ─────────────────────────────────────────────────────────────────
@@ -299,28 +408,37 @@ def main():
 
     # TODO: build vectorstore
     # vectorstore = build_vectorstore()
-
+    vectorstore = build_vectorstore()
     # TODO: collect outputs for V1 and V2
     # v1_results = collect_rag_outputs(vectorstore, "v1")
     # v2_results = collect_rag_outputs(vectorstore, "v2")
-
+    v1_results = collect_rag_outputs(vectorstore, "v1")
+    v2_results = collect_rag_outputs(vectorstore, "v2")
     # TODO: run RAGAS evaluation on both
     # v1_scores = run_ragas_eval(v1_results, "v1")
     # v2_scores = run_ragas_eval(v2_results, "v2")
-
+    v1_scores = run_ragas_eval(v1_results, "v1")
+    v2_scores = run_ragas_eval(v2_results, "v2")
     # TODO: print comparison table
     # for metric in ["faithfulness", "answer_relevancy", "context_recall", "context_precision"]:
     #     s1, s2 = v1_scores[metric], v2_scores[metric]
     #     winner = "← V1" if s1 > s2 else "← V2"
     #     print(f"  {metric:30s}: V1={s1:.4f}  V2={s2:.4f}  {winner}")
-
+    for metric in ["faithfulness", "answer_relevancy", "context_recall", "context_precision"]:
+        s1, s2 = v1_scores[metric], v2_scores[metric]
+        winner = "← V1" if s1 > s2 else "← V2"
+        print(f"  {metric:30s}: V1={s1:.4f}  V2={s2:.4f}  {winner}")
     # TODO: check faithfulness target
     # best_faith = max(v1_scores["faithfulness"], v2_scores["faithfulness"])
     # if best_faith >= 0.8:
     #     print(f"✅ Target met: faithfulness = {best_faith:.4f}")
     # else:
     #     print(f"⚠️  Below target ({best_faith:.4f}). Try adjusting chunking or prompts.")
-
+    best_faith = max(v1_scores["faithfulness"], v2_scores["faithfulness"])
+    if best_faith >= 0.8:
+        print(f"✅ Target met: faithfulness = {best_faith:.4f}")
+    else:
+        print(f"⚠️  Below target ({best_faith:.4f}). Try adjusting chunking or prompts.")
     # TODO: save JSON report to data/ragas_report.json
     # report = {
     #     "prompt_v1_scores": v1_scores,
@@ -329,8 +447,13 @@ def main():
     # }
     # Path("data/ragas_report.json").write_text(json.dumps(report, indent=2))
     # print("💾 Saved data/ragas_report.json")
-
-    pass  # remove this line when done
+    report = {
+        "prompt_v1_scores": v1_scores,
+        "prompt_v2_scores": v2_scores,
+        "target_met": best_faith >= 0.8,
+    }
+    Path("data/ragas_report.json").write_text(json.dumps(report, indent=2))
+    print("💾 Saved data/ragas_report.json")
 
 
 if __name__ == "__main__":
